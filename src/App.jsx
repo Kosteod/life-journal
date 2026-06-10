@@ -1,162 +1,200 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useRef } from "react";
 
 // ─────────────────────────────────────────────────────────────────────────────
-// КОНФИГУРАЦИЯ SUPABASE
-// Чтобы изменить — просто замени эти две строки
+// КОНФИГУРАЦИЯ — замени если переедешь на другой проект
 // ─────────────────────────────────────────────────────────────────────────────
 const SUPABASE_URL = "https://hfnjanaljjxohdkvwyoo.supabase.co";
 const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhmbmphbmFsamp4b2hka3Z3eW9vIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODEwMDIxODQsImV4cCI6MjA5NjU3ODE4NH0.36RQExXDeRQBsHoQphttKiVNC9nte6lLIPs0aRyALJw";
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SUPABASE API — простые функции для работы с базой
+// ГЛОБАЛЬНЫЙ КЭШ — повторные запросы возвращаются мгновенно из памяти
 // ─────────────────────────────────────────────────────────────────────────────
-const headers = {
-  "Content-Type": "application/json",
-  "apikey": SUPABASE_KEY,
-  "Authorization": `Bearer ${SUPABASE_KEY}`,
-  "Prefer": "return=representation",
+const _cache = new Map();
+const TTL = 60_000;
+const cGet = (k) => { const e = _cache.get(k); if (!e) return null; if (Date.now()-e.ts>TTL){_cache.delete(k);return null;} return e.d; };
+const cSet = (k,d) => _cache.set(k,{d,ts:Date.now()});
+const cDel = (prefix) => { for(const k of _cache.keys()) if(k.includes(prefix)) _cache.delete(k); };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SUPABASE API
+// ─────────────────────────────────────────────────────────────────────────────
+const H = {
+  "Content-Type":"application/json",
+  "apikey":SUPABASE_KEY,
+  "Authorization":`Bearer ${SUPABASE_KEY}`,
+  "Prefer":"return=representation",
 };
 
+async function cfetch(url) {
+  const hit = cGet(url);
+  if (hit !== null) return hit;
+  const r = await fetch(url, {headers:H});
+  const d = await r.json();
+  const result = Array.isArray(d) ? d : [];
+  cSet(url, result);
+  return result;
+}
+
 const db = {
-  // Получить одну запись по условию
   async get(table, match) {
-    const params = Object.entries(match).map(([k,v])=>`${k}=eq.${v}`).join("&");
-    const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}?${params}`, { headers });
-    const data = await r.json();
-    return data[0] || null;
+    const p = Object.entries(match).map(([k,v])=>`${k}=eq.${v}`).join("&");
+    const data = await cfetch(`${SUPABASE_URL}/rest/v1/${table}?${p}`);
+    return data[0]||null;
   },
-  // Получить несколько записей
-  async getMany(table, match = {}, order = "") {
+  async getMany(table, match={}, order="") {
     let url = `${SUPABASE_URL}/rest/v1/${table}`;
-    const params = Object.entries(match).map(([k,v])=>`${k}=eq.${v}`);
-    if (order) params.push(`order=${order}`);
-    if (params.length) url += "?" + params.join("&");
-    const r = await fetch(url, { headers });
-    return await r.json();
+    const p = Object.entries(match).map(([k,v])=>`${k}=eq.${v}`);
+    if(order) p.push(`order=${order}`);
+    if(p.length) url+="?"+p.join("&");
+    return await cfetch(url);
   },
-  // Создать или обновить запись (upsert)
-  async upsert(table, data) {
-    const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}`, {
-      method: "POST",
-      headers: { ...headers, "Prefer": "resolution=merge-duplicates,return=representation" },
-      body: JSON.stringify(data),
+  async getRange(table, dateFrom, dateTo) {
+    const url = `${SUPABASE_URL}/rest/v1/${table}?date=gte.${dateFrom}&date=lte.${dateTo}&order=date.asc`;
+    return await cfetch(url);
+  },
+  async upsert(table, data, invalidate) {
+    if(invalidate) cDel(invalidate);
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}`,{
+      method:"POST",
+      headers:{...H,"Prefer":"resolution=merge-duplicates,return=representation"},
+      body:JSON.stringify(data),
     });
     const result = await r.json();
-    return result[0] || null;
+    return Array.isArray(result)?result[0]:result||null;
   },
-  // Обновить запись по id
-  async update(table, id, data) {
-    const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}?id=eq.${id}`, {
-      method: "PATCH",
-      headers,
-      body: JSON.stringify(data),
+  async update(table, id, data, invalidate) {
+    if(invalidate) cDel(invalidate);
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}?id=eq.${id}`,{
+      method:"PATCH", headers:H, body:JSON.stringify(data),
     });
     const result = await r.json();
-    return result[0] || null;
+    return Array.isArray(result)?result[0]:result||null;
   },
-  // Удалить запись по id
-  async delete(table, id) {
-    await fetch(`${SUPABASE_URL}/rest/v1/${table}?id=eq.${id}`, {
-      method: "DELETE",
-      headers,
-    });
-  },
-  // Создать новую запись
-  async insert(table, data) {
-    const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(data),
+  async insert(table, data, invalidate) {
+    if(invalidate) cDel(invalidate);
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}`,{
+      method:"POST", headers:H, body:JSON.stringify(data),
     });
     const result = await r.json();
-    return result[0] || null;
+    return Array.isArray(result)?result[0]:result||null;
+  },
+  async delete(table, id, invalidate) {
+    if(invalidate) cDel(invalidate);
+    await fetch(`${SUPABASE_URL}/rest/v1/${table}?id=eq.${id}`,{method:"DELETE",headers:H});
   },
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // УТИЛИТЫ
 // ─────────────────────────────────────────────────────────────────────────────
-const todayKey  = () => new Date().toISOString().slice(0, 10);
-const monthKey  = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}`; };
-const fmt       = (n) => new Intl.NumberFormat("ru-RU").format(n || 0);
+const todayKey  = () => new Date().toISOString().slice(0,10);
+const monthKey  = () => { const d=new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}`; };
+const fmt       = (n) => new Intl.NumberFormat("ru-RU").format(n||0);
 const DAY_RU    = ["Вс","Пн","Вт","Ср","Чт","Пт","Сб"];
 const MONTH_RU  = ["января","февраля","марта","апреля","мая","июня","июля","августа","сентября","октября","ноября","декабря"];
-
 function getLast7() {
-  return Array.from({ length: 7 }, (_, i) => {
-    const d = new Date(); d.setDate(d.getDate() - (6 - i));
-    return d.toISOString().slice(0, 10);
-  });
+  return Array.from({length:7},(_,i)=>{const d=new Date();d.setDate(d.getDate()-(6-i));return d.toISOString().slice(0,10);});
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // КОНСТАНТЫ
-// Чтобы добавить новый тип блока — просто добавь строку сюда
+// Чтобы добавить тип блока — добавь строку сюда
+// Чтобы добавить категорию расходов — добавь строку в EXPENSE_CATS
 // ─────────────────────────────────────────────────────────────────────────────
 const BLOCK_COLORS = {
-  "сон":      "#3d405b",
-  "учёба":    "#7b9ccc",
-  "спорт":    "#e07a5f",
-  "еда":      "#81b29a",
-  "работа":   "#c9a96e",
-  "отдых":    "#6b6760",
-  "прогулка": "#81b29a",
-  "свободно": "#2a2825",
+  "сон":"#3d405b","учёба":"#7b9ccc","спорт":"#e07a5f","еда":"#81b29a",
+  "работа":"#c9a96e","отдых":"#6b6760","прогулка":"#81b29a","свободно":"#2a2825",
 };
 const BLOCK_TYPES = Object.keys(BLOCK_COLORS);
-const HOURS = Array.from({ length: 18 }, (_, i) => i + 6);
-
-// Чтобы добавить категорию расходов — просто добавь строку в массив
+const HOURS = Array.from({length:18},(_,i)=>i+6);
 const EXPENSE_CATS = ["🍔 Еда","🚇 Транспорт","☕ Кафе","🛒 Продукты","💊 Здоровье","📱 Подписки","👕 Одежда","🎮 Развлечения","📚 Учёба","💸 Другое"];
 const INCOME_CATS  = ["💼 Подработка","🎁 Помощь","💰 Фриланс","📦 Продажа","💳 Другое"];
+const TABS = [{id:"day",label:"День"},{id:"finance",label:"Финансы"},{id:"stats",label:"Статистика"},{id:"month",label:"Месяц"}];
 
-const TABS = [
-  { id:"day",     label:"День"       },
-  { id:"finance", label:"Финансы"    },
-  { id:"stats",   label:"Статистика" },
-  { id:"month",   label:"Месяц"      },
-];
+// ─────────────────────────────────────────────────────────────────────────────
+// SKELETON — красивая загрузка вместо "загружаю..."
+// ─────────────────────────────────────────────────────────────────────────────
+function Skeleton({w="100%",h=16,r=6,mb=8}) {
+  return <div style={{width:w,height:h,borderRadius:r,marginBottom:mb,background:"linear-gradient(90deg,#1a1917 25%,#242220 50%,#1a1917 75%)",backgroundSize:"200% 100%",animation:"shimmer 1.4s infinite"}} />;
+}
+function SkeletonDay() {
+  return (
+    <div style={{paddingTop:20}}>
+      <style>{`@keyframes shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}`}</style>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8,marginBottom:24}}>
+        {[1,2,3,4].map(i=><Skeleton key={i} h={80} r={12}/>)}
+      </div>
+      <Skeleton h={12} w="30%" mb={14}/>
+      <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:24}}>
+        {[1,2,3,4,5,6,7,8,9,10].map(i=><Skeleton key={i} w={36} h={36} r={8} mb={0}/>)}
+      </div>
+      <Skeleton h={12} w="40%" mb={14}/>
+      {Array.from({length:6},(_,i)=><Skeleton key={i} h={32} r={6}/>)}
+    </div>
+  );
+}
+function SkeletonFinance() {
+  return (
+    <div style={{paddingTop:20}}>
+      <Skeleton h={12} w="30%" mb={14}/>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:24}}>
+        <Skeleton h={80} r={12}/><Skeleton h={80} r={12}/>
+      </div>
+      <div style={{display:"flex",gap:8,marginBottom:20}}>
+        <Skeleton h={60} r={12}/><Skeleton h={60} r={12}/><Skeleton h={60} r={12}/>
+      </div>
+      <Skeleton h={12} w="40%" mb={14}/>
+      {[1,2,3].map(i=><Skeleton key={i} h={44} r={8}/>)}
+    </div>
+  );
+}
+function SkeletonStats() {
+  return (
+    <div style={{paddingTop:20}}>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:10,marginBottom:24}}>
+        {[1,2,3,4].map(i=><Skeleton key={i} h={90} r={12}/>)}
+      </div>
+      {[1,2,3,4].map(i=>(
+        <div key={i} style={{marginBottom:24}}>
+          <Skeleton h={12} w="35%" mb={14}/>
+          <Skeleton h={80} r={8}/>
+        </div>
+      ))}
+    </div>
+  );
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ГЛАВНЫЙ КОМПОНЕНТ
 // ─────────────────────────────────────────────────────────────────────────────
 export default function App() {
-  const [tab,    setTab]    = useState("day");
-  const [date,   setDate]   = useState(todayKey());
-  const [syncing, setSyncing] = useState(false);
-  const [online,  setOnline]  = useState(true);
+  const [tab,    setTab]   = useState("day");
+  const [date,   setDate]  = useState(todayKey());
+  const [online, setOnline]= useState(true);
 
-  // Проверка соединения
-  useEffect(() => {
-    const check = async () => {
-      try {
-        await fetch(`${SUPABASE_URL}/rest/v1/daily_logs?limit=1`, { headers });
-        setOnline(true);
-      } catch { setOnline(false); }
-    };
-    check();
-  }, []);
+  useEffect(()=>{
+    fetch(`${SUPABASE_URL}/rest/v1/daily_logs?limit=1`,{headers:H})
+      .then(()=>setOnline(true)).catch(()=>setOnline(false));
+  },[]);
 
   const now = new Date();
   const dateLabel = `${DAY_RU[now.getDay()]}, ${now.getDate()} ${MONTH_RU[now.getMonth()]}`;
 
   return (
     <div style={S.root}>
-      {/* ── шапка ── */}
+      <style>{`@keyframes shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}} * {box-sizing:border-box;}`}</style>
       <div style={S.header}>
         <div>
           <div style={S.dateSmall}>{dateLabel}</div>
           <div style={S.h1}>Дневник жизни</div>
         </div>
         <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:6}}>
-          <div style={{...S.badge, borderColor: online?"#81b29a44":"#e07a5f44", color: online?"#81b29a":"#e07a5f"}}>
-            {online ? "● синхронизировано" : "● офлайн"}
+          <div style={{...S.badge,borderColor:online?"#81b29a44":"#e07a5f44",color:online?"#81b29a":"#e07a5f"}}>
+            {online?"● онлайн":"● офлайн"}
           </div>
           <input type="date" value={date} onChange={e=>setDate(e.target.value)} style={S.datePicker}/>
         </div>
       </div>
-
-      {/* ── табы ── */}
       <div style={S.tabs}>
         {TABS.map(t=>(
           <button key={t.id} onClick={()=>setTab(t.id)}
@@ -165,7 +203,6 @@ export default function App() {
           </button>
         ))}
       </div>
-
       <div style={S.body}>
         {tab==="day"     && <DayTab     date={date}/>}
         {tab==="finance" && <FinanceTab date={date}/>}
@@ -177,9 +214,9 @@ export default function App() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ВКЛАДКА ДЕНЬ
+// ДЕНЬ
 // ─────────────────────────────────────────────────────────────────────────────
-function DayTab({ date }) {
+function DayTab({date}) {
   const [log,      setLog]      = useState(null);
   const [schedule, setSchedule] = useState([]);
   const [tasks,    setTasks]    = useState([]);
@@ -188,86 +225,79 @@ function DayTab({ date }) {
   const [blockType,setBlockType]= useState("учёба");
   const [blockNote,setBlockNote]= useState("");
   const [taskInput,setTaskInput]= useState("");
+  const saveTimer = useRef({});
 
-  // Загружаем данные при смене даты
-  useEffect(() => {
+  useEffect(()=>{
     setLoading(true);
     Promise.all([
-      db.get("daily_logs", { date }),
-      db.getMany("schedule_blocks", { date }, "hour.asc"),
-      db.getMany("tasks", { date }, "created_at.asc"),
-    ]).then(([l, s, t]) => {
-      setLog(l || {});
-      setSchedule(s || []);
-      setTasks(t || []);
+      db.get("daily_logs",{date}),
+      db.getMany("schedule_blocks",{date},"hour.asc"),
+      db.getMany("tasks",{date},"created_at.asc"),
+    ]).then(([l,s,t])=>{
+      setLog(l||{});
+      setSchedule(s||[]);
+      setTasks(t||[]);
       setLoading(false);
     });
-  }, [date]);
+  },[date]);
 
-  // Сохраняем поле дневной записи
-  async function saveLog(field, value) {
-    setLog(prev => ({ ...prev, [field]: value }));
-    await db.upsert("daily_logs", { date, [field]: value });
+  // Debounced сохранение — не шлём запрос на каждый символ, ждём 600мс паузы
+  function saveLog(field, value) {
+    setLog(prev=>({...prev,[field]:value}));
+    clearTimeout(saveTimer.current[field]);
+    saveTimer.current[field] = setTimeout(()=>{
+      db.upsert("daily_logs",{date,[field]:value},`daily_logs?date=eq.${date}`);
+    },600);
   }
 
-  // Сохраняем блок расписания
   async function saveBlock(hour) {
-    const existing = schedule.find(b => b.hour === hour);
-    if (existing) {
-      const updated = await db.update("schedule_blocks", existing.id, { block_type: blockType, note: blockNote });
-      setSchedule(prev => prev.map(b => b.hour === hour ? { ...b, block_type: blockType, note: blockNote } : b));
+    const existing = schedule.find(b=>b.hour===hour);
+    cDel("schedule_blocks");
+    if(existing) {
+      await db.update("schedule_blocks",existing.id,{block_type:blockType,note:blockNote});
+      setSchedule(prev=>prev.map(b=>b.hour===hour?{...b,block_type:blockType,note:blockNote}:b));
     } else {
-      const created = await db.insert("schedule_blocks", { date, hour, block_type: blockType, note: blockNote });
-      setSchedule(prev => [...prev, created].sort((a,b)=>a.hour-b.hour));
+      const created = await db.insert("schedule_blocks",{date,hour,block_type:blockType,note:blockNote});
+      if(created) setSchedule(prev=>[...prev,created].sort((a,b)=>a.hour-b.hour));
     }
     setEditHour(null); setBlockNote("");
   }
-
   async function clearBlock(hour) {
-    const block = schedule.find(b => b.hour === hour);
-    if (block) {
-      await db.delete("schedule_blocks", block.id);
-      setSchedule(prev => prev.filter(b => b.hour !== hour));
-    }
+    const block = schedule.find(b=>b.hour===hour);
+    if(block){ await db.delete("schedule_blocks",block.id,`schedule_blocks`); setSchedule(prev=>prev.filter(b=>b.hour!==hour)); }
   }
-
-  // Задачи
   async function addTask() {
-    if (!taskInput.trim()) return;
-    const t = await db.insert("tasks", { date, text: taskInput.trim(), done: false });
-    setTasks(prev => [...prev, t]);
+    if(!taskInput.trim()) return;
+    const t = await db.insert("tasks",{date,text:taskInput.trim(),done:false},`tasks?date=eq.${date}`);
+    if(t) setTasks(prev=>[...prev,t]);
     setTaskInput("");
   }
-  async function toggleTask(id, done) {
-    await db.update("tasks", id, { done: !done });
-    setTasks(prev => prev.map(t => t.id === id ? { ...t, done: !done } : t));
+  async function toggleTask(id,done) {
+    await db.update("tasks",id,{done:!done},`tasks?date=eq.${date}`);
+    setTasks(prev=>prev.map(t=>t.id===id?{...t,done:!done}:t));
   }
   async function deleteTask(id) {
-    await db.delete("tasks", id);
-    setTasks(prev => prev.filter(t => t.id !== id));
+    await db.delete("tasks",id,`tasks?date=eq.${date}`);
+    setTasks(prev=>prev.filter(t=>t.id!==id));
   }
 
-  const isToday = date === todayKey();
+  const isToday = date===todayKey();
   const nowHour = new Date().getHours();
-  const schedMap = Object.fromEntries(schedule.map(b => [b.hour, b]));
-
-  // Подсчёт блоков по типам
+  const schedMap = Object.fromEntries(schedule.map(b=>[b.hour,b]));
   const blockCount = {};
-  schedule.forEach(b => { blockCount[b.block_type] = (blockCount[b.block_type]||0)+1; });
+  schedule.forEach(b=>{blockCount[b.block_type]=(blockCount[b.block_type]||0)+1;});
 
-  if (loading) return <Loader/>;
+  if(loading) return <SkeletonDay/>;
 
   return (
     <>
-      {/* ── витальные показатели ── */}
       <div style={S.vitalsGrid}>
-        <Vital icon="😴" label="Сон (ч)"  val={log?.sleep||""} color="#7b9ccc" onChange={v=>saveLog("sleep",v)}/>
-        <Vital icon="👣" label="Шаги"     val={log?.steps||""} color="#81b29a" onChange={v=>saveLog("steps",v)}/>
-        <Vital icon="🔥" label="Калории"  val={log?.kcal||""}  color="#e07a5f" onChange={v=>saveLog("kcal",v)}/>
-        <Vital icon="💧" label="Вода (мл)"val={log?.water||""} color="#7bc4cc" onChange={v=>saveLog("water",v)}/>
+        <Vital icon="😴" label="Сон (ч)"   val={log?.sleep||""} color="#7b9ccc" onChange={v=>saveLog("sleep",v)}/>
+        <Vital icon="👣" label="Шаги"      val={log?.steps||""} color="#81b29a" onChange={v=>saveLog("steps",v)}/>
+        <Vital icon="🔥" label="Калории"   val={log?.kcal||""}  color="#e07a5f" onChange={v=>saveLog("kcal",v)}/>
+        <Vital icon="💧" label="Вода (мл)" val={log?.water||""} color="#7bc4cc" onChange={v=>saveLog("water",v)}/>
       </div>
 
-      {/* ── настроение ── */}
       <Sec title="Состояние">
         <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:10}}>
           {[1,2,3,4,5,6,7,8,9,10].map(n=>(
@@ -287,9 +317,8 @@ function DayTab({ date }) {
         </div>
       </Sec>
 
-      {/* ── расписание ── */}
       <Sec title="Почасовое расписание">
-        {Object.keys(blockCount).length>0 && (
+        {Object.keys(blockCount).length>0&&(
           <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:12}}>
             {Object.entries(blockCount).map(([type,cnt])=>(
               <div key={type} style={{...S.tag,borderColor:BLOCK_COLORS[type]+"88",color:BLOCK_COLORS[type],background:BLOCK_COLORS[type]+"18"}}>
@@ -299,22 +328,19 @@ function DayTab({ date }) {
           </div>
         )}
         <div style={{display:"flex",flexDirection:"column",gap:2}}>
-          {HOURS.map(h => {
-            const block    = schedMap[h];
-            const isCurrent = isToday && nowHour === h;
-            const isPast    = isToday && nowHour > h;
-            return (
+          {HOURS.map(h=>{
+            const block=schedMap[h];
+            const isCurrent=isToday&&nowHour===h;
+            const isPast=isToday&&nowHour>h;
+            return(
               <div key={h}>
-                <div onClick={()=>{ setEditHour(editHour===h?null:h); if(block){setBlockType(block.block_type);setBlockNote(block.note||"");} }}
-                  style={{
-                    ...S.hourRow,
+                <div onClick={()=>{setEditHour(editHour===h?null:h);if(block){setBlockType(block.block_type);setBlockNote(block.note||"");}}}
+                  style={{...S.hourRow,
                     borderLeft:`3px solid ${block?BLOCK_COLORS[block.block_type]||"#555":isCurrent?"#e07a5f":"#2a2825"}`,
-                    background: block?BLOCK_COLORS[block.block_type]+"18":isCurrent?"#e07a5f08":"transparent",
-                    opacity: isPast && !block ? 0.35 : 1,
-                  }}>
+                    background:block?BLOCK_COLORS[block.block_type]+"18":isCurrent?"#e07a5f08":"transparent",
+                    opacity:isPast&&!block?0.35:1}}>
                   <div style={{...S.hourLabel,color:isCurrent?"#e07a5f":isPast?"#555":"#888"}}>
-                    {String(h).padStart(2,"0")}:00
-                    {isCurrent&&<span style={{fontSize:8,color:"#e07a5f",marginLeft:4}}>●</span>}
+                    {String(h).padStart(2,"0")}:00{isCurrent&&<span style={{fontSize:8,color:"#e07a5f",marginLeft:4}}>●</span>}
                   </div>
                   <div style={{flex:1,fontSize:13,color:block?BLOCK_COLORS[block.block_type]:"#2a2825"}}>
                     {block&&<><span style={{textTransform:"capitalize"}}>{block.block_type}</span>{block.note&&<span style={{color:"#666",fontSize:12}}> — {block.note}</span>}</>}
@@ -343,7 +369,6 @@ function DayTab({ date }) {
         </div>
       </Sec>
 
-      {/* ── задачи ── */}
       <Sec title="Задачи дня">
         <div style={{display:"flex",gap:8,marginBottom:10}}>
           <input value={taskInput} onChange={e=>setTaskInput(e.target.value)}
@@ -363,7 +388,6 @@ function DayTab({ date }) {
         ))}
       </Sec>
 
-      {/* ── учёба ── */}
       <Sec title="Учёба (SQL / Python)">
         <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:10}}>
           {["✅ Занимался час","📖 15–30 минут","🔁 Повторял","😴 День отдыха"].map(opt=>(
@@ -377,7 +401,6 @@ function DayTab({ date }) {
           placeholder="Что прошёл сегодня..." style={S.input}/>
       </Sec>
 
-      {/* ── заметка ── */}
       <Sec title="Заметка дня">
         <textarea rows={3} value={log?.note||""} onChange={e=>saveLog("note",e.target.value)}
           placeholder="Мысли, ощущения, итог дня..." style={S.ta}/>
@@ -387,52 +410,52 @@ function DayTab({ date }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ВКЛАДКА ФИНАНСЫ
+// ФИНАНСЫ
 // ─────────────────────────────────────────────────────────────────────────────
-function FinanceTab({ date }) {
+function FinanceTab({date}) {
   const [txs,    setTxs]    = useState([]);
   const [budget, setBudget] = useState(null);
   const [loading,setLoading]= useState(true);
-  const [form,   setForm]   = useState({ type:"expense", amount:"", cat:EXPENSE_CATS[0], note:"" });
+  const [form,   setForm]   = useState({type:"expense",amount:"",cat:EXPENSE_CATS[0],note:""});
 
-  useEffect(() => {
+  useEffect(()=>{
+    setLoading(true);
     Promise.all([
-      db.getMany("transactions", { date }, "created_at.desc"),
-      db.get("monthly_budget", { month: date.slice(0,7) }),
-    ]).then(([t,b]) => {
+      db.getMany("transactions",{date},"created_at.desc"),
+      db.get("monthly_budget",{month:date.slice(0,7)}),
+    ]).then(([t,b])=>{
       setTxs(t||[]);
-      setBudget(b || { month: date.slice(0,7), budget:0, savings_goal:0 });
+      setBudget(b||{month:date.slice(0,7),budget:0,savings_goal:0});
       setLoading(false);
     });
-  }, [date]);
+  },[date]);
 
   async function addTx() {
-    if (!form.amount || isNaN(Number(form.amount))) return;
-    const t = await db.insert("transactions", { date, type:form.type, amount:Number(form.amount), category:form.cat, note:form.note });
-    setTxs(prev=>[t,...prev]);
+    if(!form.amount||isNaN(Number(form.amount))) return;
+    const t = await db.insert("transactions",{date,type:form.type,amount:Number(form.amount),category:form.cat,note:form.note},`transactions?date=eq.${date}`);
+    if(t) setTxs(prev=>[t,...prev]);
     setForm(f=>({...f,amount:"",note:""}));
   }
   async function removeTx(id) {
-    await db.delete("transactions", id);
+    await db.delete("transactions",id,`transactions?date=eq.${date}`);
     setTxs(prev=>prev.filter(t=>t.id!==id));
   }
-  async function saveBudget(field, value) {
-    const updated = { ...budget, [field]: Number(value) };
+  async function saveBudget(field,value) {
+    const updated={...budget,[field]:Number(value)};
     setBudget(updated);
-    await db.upsert("monthly_budget", { month: date.slice(0,7), [field]: Number(value) });
+    db.upsert("monthly_budget",{month:date.slice(0,7),[field]:Number(value)},"monthly_budget");
   }
 
-  const totalExp = txs.filter(t=>t.type==="expense").reduce((s,t)=>s+t.amount,0);
-  const totalInc = txs.filter(t=>t.type==="income").reduce((s,t)=>s+t.amount,0);
-  const balance  = totalInc - totalExp;
-  const catMap   = {};
-  txs.filter(t=>t.type==="expense").forEach(t=>{ catMap[t.category]=(catMap[t.category]||0)+t.amount; });
+  const totalExp=txs.filter(t=>t.type==="expense").reduce((s,t)=>s+t.amount,0);
+  const totalInc=txs.filter(t=>t.type==="income").reduce((s,t)=>s+t.amount,0);
+  const balance=totalInc-totalExp;
+  const catMap={};
+  txs.filter(t=>t.type==="expense").forEach(t=>{catMap[t.category]=(catMap[t.category]||0)+t.amount;});
 
-  if (loading) return <Loader/>;
+  if(loading) return <SkeletonFinance/>;
 
   return (
     <>
-      {/* ── бюджет месяца ── */}
       <Sec title="Бюджет месяца">
         <div style={S.budgetRow}>
           <div style={S.budgetCard}>
@@ -449,8 +472,7 @@ function FinanceTab({ date }) {
         {budget?.budget>0&&(
           <div style={{marginTop:12}}>
             <div style={{display:"flex",justifyContent:"space-between",fontSize:12,color:"#6b6760",marginBottom:6}}>
-              <span>Потрачено: {fmt(totalExp)} ₽</span>
-              <span>из {fmt(budget.budget)} ₽</span>
+              <span>Потрачено: {fmt(totalExp)} ₽</span><span>из {fmt(budget.budget)} ₽</span>
             </div>
             <div style={S.progressBg}>
               <div style={{...S.progressFill,width:`${Math.min(100,(totalExp/budget.budget)*100)}%`,
@@ -460,14 +482,12 @@ function FinanceTab({ date }) {
         )}
       </Sec>
 
-      {/* ── итоги дня ── */}
       <div style={S.finSummary}>
         <FinCard label="Доходы"  val={`+${fmt(totalInc)} ₽`} color="#81b29a"/>
         <FinCard label="Расходы" val={`−${fmt(totalExp)} ₽`} color="#e07a5f"/>
         <FinCard label="Баланс"  val={`${balance>=0?"+":""}${fmt(balance)} ₽`} color={balance>=0?"#81b29a":"#e07a5f"}/>
       </div>
 
-      {/* ── добавить операцию ── */}
       <Sec title="Добавить операцию">
         <div style={{display:"flex",gap:8,marginBottom:10}}>
           {["expense","income"].map(t=>(
@@ -496,7 +516,6 @@ function FinanceTab({ date }) {
         <button onClick={addTx} style={S.saveBtn}>+ Добавить</button>
       </Sec>
 
-      {/* ── список операций ── */}
       {txs.length>0&&(
         <Sec title="Операции за день">
           {txs.map(tx=>(
@@ -513,7 +532,6 @@ function FinanceTab({ date }) {
         </Sec>
       )}
 
-      {/* ── разбивка по категориям ── */}
       {Object.keys(catMap).length>0&&(
         <Sec title="По категориям">
           {Object.entries(catMap).sort((a,b)=>b[1]-a[1]).map(([cat,amt])=>(
@@ -534,68 +552,53 @@ function FinanceTab({ date }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ВКЛАДКА СТАТИСТИКА
+// СТАТИСТИКА
 // ─────────────────────────────────────────────────────────────────────────────
-function StatsTab({ last7 }) {
-  const [days, setDays] = useState([]);
-  const [loading, setLoading] = useState(true);
+function StatsTab({last7}) {
+  const [days,   setDays]   = useState([]);
+  const [loading,setLoading]= useState(true);
 
-  useEffect(() => {
-    Promise.all(
-      last7.map(date => db.get("daily_logs", { date }).then(d => ({
-        key: date,
-        label: DAY_RU[new Date(date+"T12:00:00").getDay()],
-        ...(d||{}),
-      })))
-    ).then(results => { setDays(results); setLoading(false); });
-  }, []);
+  useEffect(()=>{
+    // Один запрос на диапазон вместо 7 отдельных
+    const from = last7[0], to = last7[last7.length-1];
+    db.getRange("daily_logs",from,to).then(logs=>{
+      const logMap = Object.fromEntries(logs.map(l=>[l.date,l]));
+      setDays(last7.map(date=>({
+        key:date,
+        label:DAY_RU[new Date(date+"T12:00:00").getDay()],
+        ...(logMap[date]||{}),
+      })));
+      setLoading(false);
+    });
+  },[]);
 
-  if (loading) return <Loader/>;
+  if(loading) return <SkeletonStats/>;
 
-  const maxSteps = Math.max(...days.map(d=>Number(d.steps)||0), 10000);
-  const maxKcal  = Math.max(...days.map(d=>Number(d.kcal)||0),  2000);
+  const maxSteps=Math.max(...days.map(d=>Number(d.steps)||0),10000);
+  const maxKcal =Math.max(...days.map(d=>Number(d.kcal)||0),2000);
 
-  let studyStreak = 0;
-  for (let i=days.length-1;i>=0;i--) {
-    if (days[i].study && days[i].study!=="😴 День отдыха") studyStreak++;
-    else break;
-  }
-  const avgMood = (() => {
-    const arr = days.map(d=>d.mood).filter(Boolean);
-    return arr.length ? (arr.reduce((s,v)=>s+v,0)/arr.length).toFixed(1) : "—";
-  })();
-  const avgSleep = (() => {
-    const arr = days.map(d=>Number(d.sleep)).filter(Boolean);
-    return arr.length ? (arr.reduce((s,v)=>s+v,0)/arr.length).toFixed(1) : "—";
-  })();
+  let studyStreak=0;
+  for(let i=days.length-1;i>=0;i--){if(days[i].study&&days[i].study!=="😴 День отдыха")studyStreak++;else break;}
+  const avgMood=(()=>{const a=days.map(d=>d.mood).filter(Boolean);return a.length?(a.reduce((s,v)=>s+v,0)/a.length).toFixed(1):"—";})();
+  const avgSleep=(()=>{const a=days.map(d=>Number(d.sleep)).filter(Boolean);return a.length?(a.reduce((s,v)=>s+v,0)/a.length).toFixed(1):"—";})();
 
   return (
     <>
       <div style={S.statsGrid}>
-        <StatCard icon="🙂" label="Ср. настроение" val={`${avgMood}/10`}   color="#e07a5f"/>
-        <StatCard icon="😴" label="Ср. сон"        val={`${avgSleep} ч`}   color="#7b9ccc"/>
+        <StatCard icon="🙂" label="Ср. настроение" val={`${avgMood}/10`}    color="#e07a5f"/>
+        <StatCard icon="😴" label="Ср. сон"        val={`${avgSleep} ч`}    color="#7b9ccc"/>
         <StatCard icon="📚" label="Учёба подряд"   val={`${studyStreak} д`} color="#e8c97a"/>
         <StatCard icon="📅" label="Дней заполнено" val={`${days.filter(d=>d.mood).length}/7`} color="#81b29a"/>
       </div>
-
-      <Sec title="Настроение — 7 дней">
-        <Chart days={days} field="mood"  max={10}       color="#e07a5f"/>
-      </Sec>
-      <Sec title="Шаги — 7 дней">
-        <Chart days={days} field="steps" max={maxSteps} color="#81b29a"/>
-      </Sec>
-      <Sec title="Сон — 7 дней">
-        <Chart days={days} field="sleep" max={10}       color="#7b9ccc"/>
-      </Sec>
-      <Sec title="Калории — 7 дней">
-        <Chart days={days} field="kcal"  max={maxKcal}  color="#e8c97a"/>
-      </Sec>
-
+      <Sec title="Настроение — 7 дней"><Chart days={days} field="mood"  max={10}       color="#e07a5f"/></Sec>
+      <Sec title="Шаги — 7 дней">      <Chart days={days} field="steps" max={maxSteps} color="#81b29a"/></Sec>
+      <Sec title="Сон — 7 дней">       <Chart days={days} field="sleep" max={10}       color="#7b9ccc"/></Sec>
+      <Sec title="Калории — 7 дней">   <Chart days={days} field="kcal"  max={maxKcal}  color="#e8c97a"/></Sec>
       <Sec title="Учёба по дням">
         <div style={{display:"flex",gap:6}}>
           {days.map(d=>{
-            const done = d.study && d.study!=="😴 День отдыха";
-            const rest = d.study==="😴 День отдыха";
+            const done=d.study&&d.study!=="😴 День отдыха";
+            const rest=d.study==="😴 День отдыха";
             return(
               <div key={d.key} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:4}}>
                 <div style={{width:"100%",aspectRatio:"1",borderRadius:8,
@@ -615,49 +618,45 @@ function StatsTab({ last7 }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ВКЛАДКА МЕСЯЦ
+// МЕСЯЦ
 // ─────────────────────────────────────────────────────────────────────────────
-function MonthTab({ monthK }) {
+function MonthTab({monthK}) {
   const [logs,   setLogs]   = useState([]);
   const [txs,    setTxs]    = useState([]);
   const [budget, setBudget] = useState(null);
   const [loading,setLoading]= useState(true);
 
-  const [yr, mo] = monthK.split("-").map(Number);
-  const daysInMonth = new Date(yr, mo, 0).getDate();
-  const allDays = Array.from({length:daysInMonth},(_,i)=>
-    `${yr}-${String(mo).padStart(2,"0")}-${String(i+1).padStart(2,"0")}`
-  );
+  const [yr,mo] = monthK.split("-").map(Number);
+  const daysInMonth = new Date(yr,mo,0).getDate();
+  const allDays = Array.from({length:daysInMonth},(_,i)=>`${yr}-${String(mo).padStart(2,"0")}-${String(i+1).padStart(2,"0")}`);
+  const dateFrom = `${monthK}-01`;
+  const dateTo   = `${monthK}-${String(daysInMonth).padStart(2,"0")}`;
 
-  useEffect(() => {
+  useEffect(()=>{
+    setLoading(true);
+    // Два запроса на диапазон вместо множества отдельных
     Promise.all([
-      // Все логи за месяц
-      fetch(`${SUPABASE_URL}/rest/v1/daily_logs?date=gte.${monthK}-01&date=lte.${monthK}-28&order=date.asc`, {headers}).then(r=>r.json().then(d=>Array.isArray(d)?d:[])),
-      // Все транзакции за месяц
-      fetch(`${SUPABASE_URL}/rest/v1/transactions?date=gte.${monthK}-01&date=lte.${monthK}-28&order=date.asc`, {headers}).then(r=>r.json().then(d=>Array.isArray(d)?d:[])),
-      db.get("monthly_budget", { month: monthK }),
-    ]).then(([l,t,b]) => {
+      db.getRange("daily_logs",dateFrom,dateTo),
+      db.getRange("transactions",dateFrom,dateTo),
+      db.get("monthly_budget",{month:monthK}),
+    ]).then(([l,t,b])=>{
       setLogs(l||[]);
       setTxs(t||[]);
       setBudget(b||{budget:0,savings_goal:0});
       setLoading(false);
     });
-  }, [monthK]);
+  },[monthK]);
 
-  if (loading) return <Loader/>;
+  if(loading) return <SkeletonStats/>;
 
-  const logMap = Object.fromEntries(logs.map(l=>[l.date,l]));
-  const totalExp = txs.filter(t=>t.type==="expense").reduce((s,t)=>s+t.amount,0);
-  const totalInc = txs.filter(t=>t.type==="income").reduce((s,t)=>s+t.amount,0);
-  const savings  = (budget?.budget||0) - totalExp;
-  const studyDays= logs.filter(l=>l.study&&l.study!=="😴 День отдыха").length;
-  const avgMood  = (() => {
-    const arr=logs.map(l=>l.mood).filter(Boolean);
-    return arr.length?(arr.reduce((s,v)=>s+v,0)/arr.length).toFixed(1):"—";
-  })();
+  const logMap=Object.fromEntries(logs.map(l=>[l.date,l]));
+  const totalExp=txs.filter(t=>t.type==="expense").reduce((s,t)=>s+t.amount,0);
+  const totalInc=txs.filter(t=>t.type==="income").reduce((s,t)=>s+t.amount,0);
+  const savings=(budget?.budget||0)-totalExp;
+  const studyDays=logs.filter(l=>l.study&&l.study!=="😴 День отдыха").length;
+  const avgMood=(()=>{const a=logs.map(l=>l.mood).filter(Boolean);return a.length?(a.reduce((s,v)=>s+v,0)/a.length).toFixed(1):"—";})();
   const catMap={};
   txs.filter(t=>t.type==="expense").forEach(t=>{catMap[t.category]=(catMap[t.category]||0)+t.amount;});
-
   const MONTH_NAMES=["Январь","Февраль","Март","Апрель","Май","Июнь","Июль","Август","Сентябрь","Октябрь","Ноябрь","Декабрь"];
 
   return (
@@ -678,13 +677,10 @@ function MonthTab({ monthK }) {
             <span>Потрачено: {fmt(totalExp)} ₽</span><span>из {fmt(budget.budget)} ₽</span>
           </div>
           <div style={S.progressBg}>
-            <div style={{...S.progressFill,
-              width:`${Math.min(100,(totalExp/budget.budget)*100)}%`,
+            <div style={{...S.progressFill,width:`${Math.min(100,(totalExp/budget.budget)*100)}%`,
               background:totalExp/budget.budget>0.9?"#e07a5f":totalExp/budget.budget>0.7?"#e8c97a":"#81b29a"}}/>
           </div>
-          <div style={{fontSize:12,color:"#6b6760",marginTop:6}}>
-            Осталось: {fmt(Math.max(0,budget.budget-totalExp))} ₽
-          </div>
+          <div style={{fontSize:12,color:"#6b6760",marginTop:6}}>Осталось: {fmt(Math.max(0,budget.budget-totalExp))} ₽</div>
         </Sec>
       )}
 
@@ -704,28 +700,25 @@ function MonthTab({ monthK }) {
         </Sec>
       )}
 
-      {/* ── тепловая карта настроения ── */}
       <Sec title="Календарь настроения">
         <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:3}}>
           {["Пн","Вт","Ср","Чт","Пт","Сб","Вс"].map(d=>(
             <div key={d} style={{fontSize:9,color:"#555",textAlign:"center",paddingBottom:4}}>{d}</div>
           ))}
-          {Array.from({length:(new Date(yr,mo-1,1).getDay()+6)%7},(_,i)=>(
-            <div key={"e"+i}/>
-          ))}
+          {Array.from({length:(new Date(yr,mo-1,1).getDay()+6)%7},(_,i)=><div key={"e"+i}/>)}
           {allDays.map(k=>{
             const log=logMap[k];
             const mood=log?.mood;
             const d=Number(k.slice(8));
             const isToday=k===todayKey();
             return(
-              <div key={k} style={{
-                aspectRatio:"1",borderRadius:5,
+              <div key={k} style={{aspectRatio:"1",borderRadius:5,
                 background:mood?`hsl(${20+mood*8},${40+mood*4}%,${22+mood*3}%)`:"#1a1917",
                 border:isToday?"1px solid #e07a5f":"1px solid #2a2825",
                 display:"flex",alignItems:"center",justifyContent:"center",
-                fontSize:9,color:mood?"#f0ece4":"#333",
-              }}>{d}</div>
+                fontSize:9,color:mood?"#f0ece4":"#333"}}>
+                {d}
+              </div>
             );
           })}
         </div>
@@ -744,16 +737,16 @@ function MonthTab({ monthK }) {
 // ─────────────────────────────────────────────────────────────────────────────
 // ПЕРЕИСПОЛЬЗУЕМЫЕ КОМПОНЕНТЫ
 // ─────────────────────────────────────────────────────────────────────────────
-function Sec({ title, children }) {
-  return (
+function Sec({title,children}) {
+  return(
     <div style={{marginTop:24}}>
       <div style={S.secTitle}>{title}</div>
       {children}
     </div>
   );
 }
-function Vital({ icon, label, val, color, onChange }) {
-  return (
+function Vital({icon,label,val,color,onChange}) {
+  return(
     <div style={{...S.vitalCard,borderColor:val?color+"44":"#2a2825"}}>
       <div style={{fontSize:20,marginBottom:4}}>{icon}</div>
       <input type="number" value={val} onChange={e=>onChange(e.target.value)}
@@ -762,8 +755,8 @@ function Vital({ icon, label, val, color, onChange }) {
     </div>
   );
 }
-function Chart({ days, field, max, color }) {
-  return (
+function Chart({days,field,max,color}) {
+  return(
     <div style={{display:"flex",alignItems:"flex-end",gap:4,height:80}}>
       {days.map(d=>{
         const val=Number(d[field])||0;
@@ -780,7 +773,7 @@ function Chart({ days, field, max, color }) {
     </div>
   );
 }
-function StatCard({ icon, label, val, color }) {
+function StatCard({icon,label,val,color}) {
   return(
     <div style={{background:"#1a1917",border:`1px solid ${color}33`,borderRadius:12,padding:"14px 10px",textAlign:"center"}}>
       <div style={{fontSize:20,marginBottom:4}}>{icon}</div>
@@ -789,18 +782,11 @@ function StatCard({ icon, label, val, color }) {
     </div>
   );
 }
-function FinCard({ label, val, color }) {
+function FinCard({label,val,color}) {
   return(
     <div style={{flex:1,background:"#1a1917",border:`1px solid ${color}33`,borderRadius:12,padding:"12px 8px",textAlign:"center"}}>
       <div style={{fontSize:14,color,marginBottom:4}}>{val}</div>
       <div style={{fontSize:11,color:"#6b6760"}}>{label}</div>
-    </div>
-  );
-}
-function Loader() {
-  return(
-    <div style={{textAlign:"center",padding:"60px 0",color:"#555",fontSize:13}}>
-      загружаю...
     </div>
   );
 }
@@ -829,9 +815,9 @@ const S = {
   hourLabel:  {fontSize:12,minWidth:42,fontVariantNumeric:"tabular-nums"},
   editPanel:  {background:"#1a1917",border:"1px solid #2a2825",borderRadius:10,padding:"12px",margin:"4px 0 6px"},
   clearBtn:   {background:"none",border:"none",color:"#444",cursor:"pointer",fontSize:13,padding:"2px 6px"},
-  input:      {width:"100%",background:"#1a1917",border:"1px solid #2a2825",borderRadius:8,padding:"10px 12px",color:"#f0ece4",fontSize:14,fontFamily:"inherit",outline:"none",boxSizing:"border-box"},
+  input:      {width:"100%",background:"#1a1917",border:"1px solid #2a2825",borderRadius:8,padding:"10px 12px",color:"#f0ece4",fontSize:14,fontFamily:"inherit",outline:"none"},
   saveBtn:    {padding:"9px 18px",borderRadius:8,border:"1px solid #81b29a",background:"#81b29a18",color:"#81b29a",fontSize:13,cursor:"pointer",fontFamily:"inherit"},
-  ta:         {width:"100%",background:"#1a1917",border:"1px solid #2a2825",borderRadius:8,padding:"10px 12px",color:"#f0ece4",fontSize:13,fontFamily:"inherit",resize:"none",outline:"none",boxSizing:"border-box",lineHeight:1.6},
+  ta:         {width:"100%",background:"#1a1917",border:"1px solid #2a2825",borderRadius:8,padding:"10px 12px",color:"#f0ece4",fontSize:13,fontFamily:"inherit",resize:"none",outline:"none",lineHeight:1.6},
   budgetRow:  {display:"grid",gridTemplateColumns:"1fr 1fr",gap:10},
   budgetCard: {background:"#1a1917",border:"1px solid #2a2825",borderRadius:12,padding:"14px"},
   budgetLabel:{fontSize:11,color:"#6b6760",marginBottom:8},
