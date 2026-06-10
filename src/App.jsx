@@ -632,9 +632,9 @@ function MonthTab({ monthK }) {
   useEffect(() => {
     Promise.all([
       // Все логи за месяц
-      fetch(`${SUPABASE_URL}/rest/v1/daily_logs?date=gte.${monthK}-01&date=lte.${monthK}-31`, {headers}).then(r=>r.json()),
+      fetch(`${SUPABASE_URL}/rest/v1/daily_logs?date=gte.${monthK}-01&date=lte.${monthK}-28&order=date.asc`, {headers}).then(r=>r.json().then(d=>Array.isArray(d)?d:[])),
       // Все транзакции за месяц
-      fetch(`${SUPABASE_URL}/rest/v1/transactions?date=gte.${monthK}-01&date=lte.${monthK}-31`, {headers}).then(r=>r.json()),
+      fetch(`${SUPABASE_URL}/rest/v1/transactions?date=gte.${monthK}-01&date=lte.${monthK}-28&order=date.asc`, {headers}).then(r=>r.json().then(d=>Array.isArray(d)?d:[])),
       db.get("monthly_budget", { month: monthK }),
     ]).then(([l,t,b]) => {
       setLogs(l||[]);
