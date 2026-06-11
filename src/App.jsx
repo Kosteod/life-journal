@@ -1,4 +1,3 @@
-cat > /mnt/user-data/outputs/life-journal.jsx << 'ENDOFFILE'
 import { useState, useEffect, useRef } from "react";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -962,4 +961,3 @@ const S = {
   txRow:      {display:"flex",alignItems:"center",gap:8,padding:"10px 12px",background:"#1a1917",borderRadius:8,marginBottom:6,border:"1px solid #2a2825"},
   resultBtn:  {flex:1,padding:"12px",borderRadius:10,border:"1px solid",fontSize:15,cursor:"pointer",fontFamily:"inherit",transition:"all 0.15s"},
 };
-ENDOFFILE
