@@ -788,7 +788,6 @@ function MonthTab({monthK}) {
 // ФИНАНСЫ
 // ─────────────────────────────────────────────────────────────────────────────
 function FinanceTab({settings, saveSettings}) {
-  const [fixedLimit, setFixedLimit] = useState(null);
   const [txs,        setTxs]        = useState([]);
   const [loading,    setLoading]    = useState(true);
   const [form,       setForm]       = useState({type:"expense",amount:"",cat:EXPENSE_CATS[0],note:""});
@@ -806,7 +805,6 @@ function FinanceTab({settings, saveSettings}) {
       api.get("daily_logs", {date, user_id: _userId}),
     ]).then(([t, todayLog]) => {
       setTxs(t||[]);
-      if (todayLog?.daily_limit) setFixedLimit(todayLog.daily_limit);
       setLoading(false);
     });
   },[]);
@@ -814,19 +812,6 @@ function FinanceTab({settings, saveSettings}) {
   async function addTx() {
   if (!form.amount||isNaN(Number(form.amount))) return;
   const amount = Number(form.amount);
-
-  // Считаем лимит на день если ещё не зафиксирован
-  const todayLog = await api.get("daily_logs", {date, user_id: _userId});
-  if (!todayLog?.daily_limit && daysToNext > 0) {
-    const limitToday = Math.floor(workBalance / daysToNext);
-    if (todayLog) {
-      await api.update("daily_logs", todayLog.id, {daily_limit: limitToday}, "daily_logs");
-    } else {
-      await api.upsert("daily_logs", {date, user_id: _userId, daily_limit: limitToday}, "daily_logs");
-    }
-    setFixedLimit(limitToday);
-  }
-
   const t = await api.insert("transactions",{date,type:form.type,amount,category:form.cat,note:form.note},"transactions");
   if (t) {
     setTxs(prev=>[...prev,t]);
@@ -890,8 +875,14 @@ function FinanceTab({settings, saveSettings}) {
   const nextAmount = settings.next_income_amount||0;
   const daysToNext = daysUntil(nextDate);
 
-  // Лимит на день = рабочий баланс / дней до дохода
-  const dailyLimit = fixedLimit || (daysToNext>0 ? Math.floor(workBalance/daysToNext) : canFallback());
+  // Восстанавливаем баланс начала дня — прибавляем сегодняшние расходы, вычитаем доходы
+  const todayExpenses = todayTxs.filter(t=>t.type==="expense").reduce((s,t)=>s+t.amount,0);
+  const todayIncomes  = todayTxs.filter(t=>t.type==="income").reduce((s,t)=>s+t.amount,0);
+  const balanceStartOfDay = balance + todayExpenses - todayIncomes;
+  const workBalanceStartOfDay = balanceStartOfDay - savingsGoal;
+  const dailyLimit = daysToNext>0
+  ? Math.floor(workBalanceStartOfDay/daysToNext)
+  : canFallback();
   function canFallback() { return avgDay7>0 ? Math.floor(workBalance/30) : null; }
 
   // Сколько осталось сегодня
