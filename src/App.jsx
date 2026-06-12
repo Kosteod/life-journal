@@ -83,7 +83,7 @@ const api = {
   async get(table, match) {
     const p = Object.entries(match).map(([k,v]) => `${k}=eq.${encodeURIComponent(v)}`).join("&");
     const url = p ? `${SUPABASE_URL}/rest/v1/${table}?${p}` : `${SUPABASE_URL}/rest/v1/${table}?user_id=eq.${_userId}`;
-const data = await cfetch(url);
+    const data = await cfetch(url);
     return data[0] || null;
   },
   async getMany(table, match={}, order="") {
