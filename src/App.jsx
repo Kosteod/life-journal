@@ -793,12 +793,15 @@ function FinanceTab({settings, saveSettings}) {
   const [form,       setForm]       = useState({type:"expense",amount:"",cat:EXPENSE_CATS[0],note:""});
   const [editBalance,setEditBalance]= useState(false);
   const [editIncome, setEditIncome] = useState(false);
+  const [editSavings,setEditSavings]= useState(false);
   const [tempBalance,setTempBalance]= useState("");
+  const [tempSavings,setTempSavings]= useState("");
   const date = todayISO();
 
   useEffect(()=>{
     const from = new Date(); from.setDate(from.getDate()-30);
-    api.getRange("transactions", from.toISOString().slice(0,10), date).then(t=>{setTxs(t||[]);setLoading(false);});
+    api.getRange("transactions", from.toISOString().slice(0,10), date)
+      .then(t=>{ setTxs(t||[]); setLoading(false); });
   },[]);
 
   async function addTx() {
@@ -807,7 +810,11 @@ function FinanceTab({settings, saveSettings}) {
     const t = await api.insert("transactions",{date,type:form.type,amount,category:form.cat,note:form.note},"transactions");
     if (t) {
       setTxs(prev=>[...prev,t]);
-      saveSettings({balance:(settings.balance||0)+(form.type==="income"?amount:-amount)});
+      const existing = await api.get("settings",{user_id:_userId});
+      const newBalance = (settings.balance||0)+(form.type==="income"?amount:-amount);
+      if (existing) await api.update("settings",existing.id,{balance:newBalance},"settings");
+      else await api.upsert("settings",{user_id:_userId,balance:newBalance},"settings");
+      saveSettings({balance:newBalance});
     }
     setForm(f=>({...f,amount:"",note:""}));
   }
@@ -815,25 +822,63 @@ function FinanceTab({settings, saveSettings}) {
   async function removeTx(id,type,amount) {
     await api.delete("transactions",id,"transactions");
     setTxs(prev=>prev.filter(t=>t.id!==id));
-    saveSettings({balance:(settings.balance||0)+(type==="income"?-amount:amount)});
+    const existing = await api.get("settings",{user_id:_userId});
+    const newBalance = (settings.balance||0)+(type==="income"?-amount:amount);
+    if (existing) await api.update("settings",existing.id,{balance:newBalance},"settings");
+    else await api.upsert("settings",{user_id:_userId,balance:newBalance},"settings");
+    saveSettings({balance:newBalance});
   }
 
+  async function handleSaveBalance(val) {
+    const newBalance = Number(val);
+    const existing = await api.get("settings",{user_id:_userId});
+    if (existing) await api.update("settings",existing.id,{balance:newBalance},"settings");
+    else await api.upsert("settings",{user_id:_userId,balance:newBalance},"settings");
+    saveSettings({balance:newBalance});
+    setEditBalance(false);
+  }
+
+  async function handleSaveSavingsGoal(val) {
+    const newGoal = Number(val);
+    const existing = await api.get("settings",{user_id:_userId});
+    if (existing) await api.update("settings",existing.id,{savings_goal:newGoal},"settings");
+    else await api.upsert("settings",{user_id:_userId,savings_goal:newGoal},"settings");
+    saveSettings({savings_goal:newGoal});
+    setEditSavings(false);
+  }
+
+  const balance      = settings.balance||0;
+  const savingsGoal  = settings.savings_goal||0;
+  // Рабочий баланс — из него вычитаем цель накопления
+  const workBalance  = balance - savingsGoal;
+
   const todayTxs = txs.filter(t=>t.date===date);
-  const now30    = new Date(); now30.setDate(now30.getDate()-30);
-  const now7     = new Date(); now7.setDate(now7.getDate()-7);
-  const exp7     = txs.filter(t=>t.type==="expense"&&new Date(t.date)>=now7).reduce((s,t)=>s+t.amount,0);
-  const exp30    = txs.filter(t=>t.type==="expense"&&new Date(t.date)>=now30).reduce((s,t)=>s+t.amount,0);
+  const todayExp = todayTxs.filter(t=>t.type==="expense").reduce((s,t)=>s+t.amount,0);
+
+  const now7  = new Date(); now7.setDate(now7.getDate()-7);
+  const now30 = new Date(); now30.setDate(now30.getDate()-30);
+  const exp7  = txs.filter(t=>t.type==="expense"&&new Date(t.date)>=now7).reduce((s,t)=>s+t.amount,0);
+  const exp30 = txs.filter(t=>t.type==="expense"&&new Date(t.date)>=now30).reduce((s,t)=>s+t.amount,0);
   const avgDay7  = exp7/7;
   const avgDay30 = exp30/30;
-  const balance  = settings.balance||0;
-  const days7    = avgDay7>0  ? Math.floor(balance/avgDay7)  : null;
-  const days30   = avgDay30>0 ? Math.floor(balance/avgDay30) : null;
+
+  // Прогноз считается от рабочего баланса
+  const days7  = avgDay7>0  ? Math.floor(workBalance/avgDay7)  : null;
+  const days30 = avgDay30>0 ? Math.floor(workBalance/avgDay30) : null;
 
   const nextDate   = settings.next_income_date;
   const nextAmount = settings.next_income_amount||0;
   const daysToNext = daysUntil(nextDate);
-  const canPerDay  = daysToNext>0 ? Math.floor(balance/daysToNext) : null;
-  const willRunOut = daysToNext && avgDay7>0 && balance/avgDay7 < daysToNext;
+
+  // Лимит на день = рабочий баланс / дней до дохода
+  const dailyLimit = daysToNext>0 ? Math.floor(workBalance/daysToNext) : canFallback();
+  function canFallback() { return avgDay7>0 ? Math.floor(workBalance/30) : null; }
+
+  // Сколько осталось сегодня
+  const todayLeft    = dailyLimit !== null ? dailyLimit - todayExp : null;
+  const todayOverrun = todayLeft !== null && todayLeft < 0;
+
+  const willRunOut = daysToNext && avgDay7>0 && workBalance/avgDay7 < daysToNext;
 
   const monthStart = monthISO()+"-01";
   const catMap = {};
@@ -847,24 +892,30 @@ function FinanceTab({settings, saveSettings}) {
       {/* ── БАЛАНС ── */}
       <div style={{marginTop:20,background:"#1a1917",borderRadius:16,padding:"20px",border:"1px solid #2a2825"}}>
         <div style={{fontSize:11,letterSpacing:2,color:"#6b6760",textTransform:"uppercase",marginBottom:8}}>Текущий баланс</div>
-        {editBalance?(
+        {editBalance ? (
           <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:8}}>
             <input type="number" autoFocus value={tempBalance}
               onChange={e=>setTempBalance(e.target.value)}
-              onKeyDown={e=>{if(e.key==="Enter"){saveSettings({balance:Number(tempBalance)});setEditBalance(false);}}}
+              onKeyDown={e=>e.key==="Enter"&&handleSaveBalance(tempBalance)}
               placeholder="0"
               style={{...S.bigInput,fontSize:28,color:"#f0ece4",flex:1,borderBottom:"1px solid #2a2825"}}/>
             <span style={{fontSize:16,color:"#6b6760"}}>₽</span>
-            <button onClick={()=>{saveSettings({balance:Number(tempBalance)});setEditBalance(false);}} style={S.saveBtn}>OK</button>
+            <button onClick={()=>handleSaveBalance(tempBalance)} style={S.saveBtn}>OK</button>
           </div>
-        ):(
+        ) : (
           <div style={{display:"flex",alignItems:"flex-end",gap:8,marginBottom:4}}>
-            <div style={{fontSize:32,color:balance>0?"#f0ece4":"#e07a5f",fontWeight:"normal"}}>{fmt(balance)}</div>
+            <div style={{fontSize:32,color:balance>0?"#f0ece4":"#e07a5f"}}>{fmt(balance)}</div>
             <div style={{fontSize:18,color:"#6b6760",marginBottom:4}}>₽</div>
             <button onClick={()=>{setTempBalance(String(balance));setEditBalance(true);}}
               style={{fontSize:11,color:"#555",background:"none",border:"1px solid #2a2825",borderRadius:6,padding:"2px 8px",cursor:"pointer",fontFamily:"inherit",marginBottom:4}}>
               изменить
             </button>
+          </div>
+        )}
+        {savingsGoal>0&&(
+          <div style={{fontSize:12,color:"#6b6760",marginBottom:8}}>
+            Отложено в цель: <span style={{color:"#e8c97a"}}>{fmt(savingsGoal)} ₽</span>
+            {" · "}Доступно: <span style={{color:"#f0ece4"}}>{fmt(workBalance)} ₽</span>
           </div>
         )}
         <div style={{display:"flex",gap:16,fontSize:12,color:"#6b6760"}}>
@@ -873,34 +924,111 @@ function FinanceTab({settings, saveSettings}) {
         </div>
       </div>
 
+      {/* ── БАЛАНС НА ДЕНЬ ── */}
+      {dailyLimit!==null&&(
+        <div style={{marginTop:10,background:"#1a1917",borderRadius:14,padding:"16px",
+          border:`1px solid ${todayOverrun?"#e07a5f44":"#2a2825"}`}}>
+          <div style={{fontSize:11,letterSpacing:2,color:"#6b6760",textTransform:"uppercase",marginBottom:10}}>
+            Баланс на сегодня
+          </div>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-end",marginBottom:12}}>
+            <div>
+              <div style={{fontSize:11,color:"#6b6760",marginBottom:4}}>Лимит</div>
+              <div style={{fontSize:22,color:"#e8c97a"}}>{fmt(dailyLimit)} ₽</div>
+            </div>
+            <div style={{textAlign:"center"}}>
+              <div style={{fontSize:11,color:"#6b6760",marginBottom:4}}>Потрачено</div>
+              <div style={{fontSize:22,color:"#e07a5f"}}>{fmt(todayExp)} ₽</div>
+            </div>
+            <div style={{textAlign:"right"}}>
+              <div style={{fontSize:11,color:"#6b6760",marginBottom:4}}>{todayOverrun?"Перерасход":"Осталось"}</div>
+              <div style={{fontSize:22,color:todayOverrun?"#e07a5f":"#81b29a"}}>
+                {fmt(Math.abs(todayLeft))} ₽
+              </div>
+            </div>
+          </div>
+          {/* Шкала дня */}
+          <div style={{height:8,background:"#0f0e0d",borderRadius:4,overflow:"hidden"}}>
+            <div style={{height:"100%",borderRadius:4,transition:"width 0.4s",
+              width:`${Math.min(100,dailyLimit>0?todayExp/dailyLimit*100:0)}%`,
+              background:todayOverrun?"#e07a5f":todayExp/dailyLimit>0.8?"#e8c97a":"#81b29a"}}/>
+          </div>
+          {todayOverrun&&(
+            <div style={{marginTop:8,fontSize:12,color:"#e07a5f"}}>
+              ⚠ Вышел за лимит на {fmt(-todayLeft)} ₽
+            </div>
+          )}
+        </div>
+      )}
+
       {/* ── ПРОГНОЗ ── */}
       {(days7!==null||days30!==null)&&(
         <div style={{marginTop:10,display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
-          {days7!==null&&<div style={{background:"#1a1917",borderRadius:12,padding:"14px",border:"1px solid #2a2825",textAlign:"center"}}>
-            <div style={{fontSize:11,color:"#6b6760",marginBottom:6}}>Хватит (7д темп)</div>
-            <div style={{fontSize:22,color:days7<14?"#e07a5f":days7<30?"#e8c97a":"#81b29a"}}>{days7} дн</div>
-          </div>}
-          {days30!==null&&<div style={{background:"#1a1917",borderRadius:12,padding:"14px",border:"1px solid #2a2825",textAlign:"center"}}>
-            <div style={{fontSize:11,color:"#6b6760",marginBottom:6}}>Хватит (30д темп)</div>
-            <div style={{fontSize:22,color:days30<14?"#e07a5f":days30<30?"#e8c97a":"#81b29a"}}>{days30} дн</div>
-          </div>}
+          {days7!==null&&(
+            <div style={{background:"#1a1917",borderRadius:12,padding:"14px",border:"1px solid #2a2825",textAlign:"center"}}>
+              <div style={{fontSize:11,color:"#6b6760",marginBottom:6}}>Хватит (7д темп)</div>
+              <div style={{fontSize:22,color:days7<14?"#e07a5f":days7<30?"#e8c97a":"#81b29a"}}>{days7} дн</div>
+            </div>
+          )}
+          {days30!==null&&(
+            <div style={{background:"#1a1917",borderRadius:12,padding:"14px",border:"1px solid #2a2825",textAlign:"center"}}>
+              <div style={{fontSize:11,color:"#6b6760",marginBottom:6}}>Хватит (30д темп)</div>
+              <div style={{fontSize:22,color:days30<14?"#e07a5f":days30<30?"#e8c97a":"#81b29a"}}>{days30} дн</div>
+            </div>
+          )}
         </div>
       )}
+
+      {/* ── ЦЕЛЬ НАКОПЛЕНИЯ ── */}
+      <Sec title="Цель накопления">
+        <div style={{background:"#1a1917",borderRadius:14,padding:"16px",border:"1px solid #2a2825"}}>
+          <div style={{fontSize:12,color:"#6b6760",marginBottom:10,lineHeight:1.5}}>
+            Эта сумма откладывается и не учитывается в лимитах расходов
+          </div>
+          {editSavings ? (
+            <div style={{display:"flex",gap:8,alignItems:"center"}}>
+              <input type="number" autoFocus value={tempSavings}
+                onChange={e=>setTempSavings(e.target.value)}
+                onKeyDown={e=>e.key==="Enter"&&handleSaveSavingsGoal(tempSavings)}
+                placeholder="0" style={{...S.input,flex:1}}/>
+              <span style={{fontSize:14,color:"#6b6760"}}>₽</span>
+              <button onClick={()=>handleSaveSavingsGoal(tempSavings)} style={S.saveBtn}>OK</button>
+            </div>
+          ) : (
+            <div style={{display:"flex",alignItems:"center",gap:12}}>
+              <div style={{fontSize:22,color:"#e8c97a"}}>{fmt(savingsGoal)} ₽</div>
+              <button onClick={()=>{setTempSavings(String(savingsGoal));setEditSavings(true);}}
+                style={{fontSize:11,color:"#555",background:"none",border:"1px solid #2a2825",borderRadius:6,padding:"2px 8px",cursor:"pointer",fontFamily:"inherit"}}>
+                {savingsGoal>0?"изменить":"указать цель"}
+              </button>
+            </div>
+          )}
+          {savingsGoal>0&&balance>0&&(
+            <div style={{marginTop:10,fontSize:12,color:"#6b6760"}}>
+              Накоплено: <span style={{color:"#e8c97a"}}>{Math.round(savingsGoal/balance*100)}% от баланса</span>
+            </div>
+          )}
+        </div>
+      </Sec>
 
       {/* ── СЛЕДУЮЩИЙ ДОХОД ── */}
       <Sec title="Следующий доход">
         <div style={{background:"#1a1917",borderRadius:14,padding:"16px",border:"1px solid #2a2825"}}>
-          {editIncome?(
+          {editIncome ? (
             <div style={{display:"flex",flexDirection:"column",gap:8}}>
               <div style={{display:"flex",gap:8}}>
-                <input type="date" defaultValue={nextDate||""} onChange={e=>saveSettings({next_income_date:e.target.value})} style={{...S.input,flex:1}}/>
-                <input type="number" defaultValue={nextAmount||""} onChange={e=>saveSettings({next_income_amount:Number(e.target.value)})} placeholder="Сумма ₽" style={{...S.input,flex:1}}/>
+                <input type="date" defaultValue={nextDate||""}
+                  onChange={e=>saveSettings({next_income_date:e.target.value})}
+                  style={{...S.input,flex:1}}/>
+                <input type="number" defaultValue={nextAmount||""}
+                  onChange={e=>saveSettings({next_income_amount:Number(e.target.value)})}
+                  placeholder="Сумма ₽" style={{...S.input,flex:1}}/>
               </div>
               <button onClick={()=>setEditIncome(false)} style={S.saveBtn}>Сохранить</button>
             </div>
-          ):(
+          ) : (
             <div>
-              {nextDate?(
+              {nextDate ? (
                 <>
                   <div style={{display:"flex",justifyContent:"space-between",marginBottom:8}}>
                     <div>
@@ -915,12 +1043,12 @@ function FinanceTab({settings, saveSettings}) {
                   {daysToNext!==null&&(
                     <div style={{display:"flex",gap:16,fontSize:13}}>
                       <span style={{color:"#6b6760"}}>До дохода: <span style={{color:daysToNext<=3?"#e07a5f":"#f0ece4"}}>{daysToNext} дн</span></span>
-                      {canPerDay&&<span style={{color:"#6b6760"}}>Лимит/день: <span style={{color:"#e8c97a"}}>{fmt(canPerDay)} ₽</span></span>}
+                      {dailyLimit&&<span style={{color:"#6b6760"}}>Лимит/день: <span style={{color:"#e8c97a"}}>{fmt(dailyLimit)} ₽</span></span>}
                     </div>
                   )}
                 </>
-              ):(
-                <div style={{fontSize:13,color:"#555"}}>Не указано</div>
+              ) : (
+                <div style={{fontSize:13,color:"#555"}}>Не указано — лимит считается по среднему за 30 дней</div>
               )}
               <button onClick={()=>setEditIncome(true)}
                 style={{marginTop:10,fontSize:11,color:"#555",background:"none",border:"1px solid #2a2825",borderRadius:6,padding:"3px 10px",cursor:"pointer",fontFamily:"inherit"}}>
@@ -955,8 +1083,10 @@ function FinanceTab({settings, saveSettings}) {
           ))}
         </div>
         <div style={{display:"flex",gap:8,marginBottom:10}}>
-          <input type="number" value={form.amount} onChange={e=>setForm(f=>({...f,amount:e.target.value}))} placeholder="Сумма ₽" style={{...S.input,flex:1}}/>
-          <input value={form.note} onChange={e=>setForm(f=>({...f,note:e.target.value}))} placeholder="Заметка" style={{...S.input,flex:2}}/>
+          <input type="number" value={form.amount} onChange={e=>setForm(f=>({...f,amount:e.target.value}))}
+            placeholder="Сумма ₽" style={{...S.input,flex:1}}/>
+          <input value={form.note} onChange={e=>setForm(f=>({...f,note:e.target.value}))}
+            placeholder="Заметка" style={{...S.input,flex:2}}/>
         </div>
         <button onClick={addTx} style={S.saveBtn}>+ Добавить</button>
       </Sec>
@@ -966,8 +1096,12 @@ function FinanceTab({settings, saveSettings}) {
         <Sec title="Сегодня">
           {todayTxs.slice().reverse().map(tx=>(
             <div key={tx.id} style={S.txRow}>
-              <div style={{flex:1}}><div style={{fontSize:13,color:"#f0ece4"}}>{tx.category}{tx.note&&<span style={{color:"#555"}}> — {tx.note}</span>}</div></div>
-              <div style={{fontSize:15,color:tx.type==="expense"?"#e07a5f":"#81b29a",marginRight:8}}>{tx.type==="expense"?"-":"+"}{fmt(tx.amount)} ₽</div>
+              <div style={{flex:1}}>
+                <div style={{fontSize:13,color:"#f0ece4"}}>{tx.category}{tx.note&&<span style={{color:"#555"}}> — {tx.note}</span>}</div>
+              </div>
+              <div style={{fontSize:15,color:tx.type==="expense"?"#e07a5f":"#81b29a",marginRight:8}}>
+                {tx.type==="expense"?"-":"+"}{fmt(tx.amount)} ₽
+              </div>
               <button onClick={()=>removeTx(tx.id,tx.type,tx.amount)} style={S.clearBtn}>✕</button>
             </div>
           ))}
@@ -994,17 +1128,20 @@ function FinanceTab({settings, saveSettings}) {
         <div style={{background:"#1a1917",borderRadius:14,padding:"16px",border:"1px solid #2a2825",display:"flex",flexDirection:"column",gap:12}}>
           <div>
             <div style={{fontSize:11,color:"#6b6760",marginBottom:6}}>Дневная норма калорий</div>
-            <input type="number" defaultValue={settings.kcal_goal||2500} onBlur={e=>saveSettings({kcal_goal:Number(e.target.value)})} style={S.input}/>
+            <input type="number" defaultValue={settings.kcal_goal||2500}
+              onBlur={e=>saveSettings({kcal_goal:Number(e.target.value)})} style={S.input}/>
           </div>
           <div>
             <div style={{fontSize:11,color:"#6b6760",marginBottom:6}}>Направление обучения</div>
-            <input defaultValue={settings.study_name||"SQL"} onBlur={e=>saveSettings({study_name:e.target.value})} style={S.input}/>
+            <input defaultValue={settings.study_name||"SQL"}
+              onBlur={e=>saveSettings({study_name:e.target.value})} style={S.input}/>
           </div>
         </div>
       </Sec>
     </>
   );
 }
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // КОМПОНЕНТЫ
