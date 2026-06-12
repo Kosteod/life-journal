@@ -288,7 +288,7 @@ export default function App() {
   // Загружаем настройки после логина
   useEffect(() => {
     if (!user) return;
-    api.get("settings", {}).then(s => {
+    api.get("settings", {user_id: _userId}).then(s => {
       setSettings(s || {study_name:"SQL",kcal_goal:2500,balance:0,next_income_date:null,next_income_amount:0});
     });
   }, [user]);
@@ -374,7 +374,7 @@ function DayTab({date, settings, saveSettings}) {
   useEffect(() => {
     setLoading(true);
     Promise.all([
-      api.get("daily_logs", {date}),
+      api.get("daily_logs", {date, user_id: _userId}),
       api.getMany("schedule_blocks", {date}, "hour.asc"),
     ]).then(([l,s]) => {
       setLog(l||{}); setSchedule(s||[]); setLoading(false);
@@ -385,7 +385,7 @@ function DayTab({date, settings, saveSettings}) {
     setLog(prev => ({...prev, [field]:value}));
     clearTimeout(saveTimer.current[field]);
     saveTimer.current[field] = setTimeout(() => {
-      api.upsert("daily_logs", {date, [field]:value}, `daily_logs?date=eq.${date}`);
+      api.upsert("daily_logs", {date, user_id: _userId, [field]:value}, `daily_logs`);
     }, 600);
   }
 
