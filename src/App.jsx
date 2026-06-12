@@ -82,7 +82,8 @@ async function cfetch(url) {
 const api = {
   async get(table, match) {
     const p = Object.entries(match).map(([k,v]) => `${k}=eq.${encodeURIComponent(v)}`).join("&");
-    const data = await cfetch(`${SUPABASE_URL}/rest/v1/${table}?${p}&user_id=eq.${_userId}`);
+    const url = p ? `${SUPABASE_URL}/rest/v1/${table}?${p}` : `${SUPABASE_URL}/rest/v1/${table}?user_id=eq.${_userId}`;
+const data = await cfetch(url);
     return data[0] || null;
   },
   async getMany(table, match={}, order="") {
@@ -384,9 +385,14 @@ function DayTab({date, settings, saveSettings}) {
   function saveLog(field, value) {
     setLog(prev => ({...prev, [field]:value}));
     clearTimeout(saveTimer.current[field]);
-    saveTimer.current[field] = setTimeout(() => {
-      api.upsert("daily_logs", {date, user_id: _userId, [field]:value}, `daily_logs`);
-    }, 600);
+    saveTimer.current[field] = setTimeout(async () => {
+      const existing = await api.get("daily_logs", {date, user_id: _userId});
+      if (existing) {
+        await api.update("daily_logs", existing.id, {[field]: value}, `daily_logs`);
+      } else {
+        await api.upsert("daily_logs", {date, user_id: _userId, [field]: value}, `daily_logs`);
+      }
+    }, 800);
   }
 
   async function saveBlock(hour) {
