@@ -788,6 +788,7 @@ function MonthTab({monthK}) {
 // ФИНАНСЫ
 // ─────────────────────────────────────────────────────────────────────────────
 function FinanceTab({settings, saveSettings}) {
+  const [fixedLimit, setFixedLimit] = useState(null);
   const [txs,        setTxs]        = useState([]);
   const [loading,    setLoading]    = useState(true);
   const [form,       setForm]       = useState({type:"expense",amount:"",cat:EXPENSE_CATS[0],note:""});
@@ -800,24 +801,43 @@ function FinanceTab({settings, saveSettings}) {
 
   useEffect(()=>{
     const from = new Date(); from.setDate(from.getDate()-30);
-    api.getRange("transactions", from.toISOString().slice(0,10), date)
-      .then(t=>{ setTxs(t||[]); setLoading(false); });
+    Promise.all([
+      api.getRange("transactions", from.toISOString().slice(0,10), date),
+      api.get("daily_logs", {date, user_id: _userId}),
+    ]).then(([t, todayLog]) => {
+      setTxs(t||[]);
+      if (todayLog?.daily_limit) setFixedLimit(todayLog.daily_limit);
+      setLoading(false);
+    });
   },[]);
 
   async function addTx() {
-    if (!form.amount||isNaN(Number(form.amount))) return;
-    const amount = Number(form.amount);
-    const t = await api.insert("transactions",{date,type:form.type,amount,category:form.cat,note:form.note},"transactions");
-    if (t) {
-      setTxs(prev=>[...prev,t]);
-      const existing = await api.get("settings",{user_id:_userId});
-      const newBalance = (settings.balance||0)+(form.type==="income"?amount:-amount);
-      if (existing) await api.update("settings",existing.id,{balance:newBalance},"settings");
-      else await api.upsert("settings",{user_id:_userId,balance:newBalance},"settings");
-      saveSettings({balance:newBalance});
+  if (!form.amount||isNaN(Number(form.amount))) return;
+  const amount = Number(form.amount);
+
+  // Считаем лимит на день если ещё не зафиксирован
+  const todayLog = await api.get("daily_logs", {date, user_id: _userId});
+  if (!todayLog?.daily_limit && daysToNext > 0) {
+    const limitToday = Math.floor(workBalance / daysToNext);
+    if (todayLog) {
+      await api.update("daily_logs", todayLog.id, {daily_limit: limitToday}, "daily_logs");
+    } else {
+      await api.upsert("daily_logs", {date, user_id: _userId, daily_limit: limitToday}, "daily_logs");
     }
-    setForm(f=>({...f,amount:"",note:""}));
+    setFixedLimit(limitToday);
   }
+
+  const t = await api.insert("transactions",{date,type:form.type,amount,category:form.cat,note:form.note},"transactions");
+  if (t) {
+    setTxs(prev=>[...prev,t]);
+    const existing = await api.get("settings",{user_id:_userId});
+    const newBalance = (settings.balance||0)+(form.type==="income"?amount:-amount);
+    if (existing) await api.update("settings",existing.id,{balance:newBalance},"settings");
+    else await api.upsert("settings",{user_id:_userId,balance:newBalance},"settings");
+    saveSettings({balance:newBalance});
+  }
+  setForm(f=>({...f,amount:"",note:""}));
+}
 
   async function removeTx(id,type,amount) {
     await api.delete("transactions",id,"transactions");
@@ -871,7 +891,7 @@ function FinanceTab({settings, saveSettings}) {
   const daysToNext = daysUntil(nextDate);
 
   // Лимит на день = рабочий баланс / дней до дохода
-  const dailyLimit = daysToNext>0 ? Math.floor(workBalance/daysToNext) : canFallback();
+  const dailyLimit = fixedLimit || (daysToNext>0 ? Math.floor(workBalance/daysToNext) : canFallback());
   function canFallback() { return avgDay7>0 ? Math.floor(workBalance/30) : null; }
 
   // Сколько осталось сегодня
