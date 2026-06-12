@@ -295,11 +295,16 @@ export default function App() {
   }, [user]);
 
   async function saveSettings(patch) {
-    const updated = { ...settings, ...patch };
-    setSettings(updated);
-    cDel("settings");
-    await api.upsert("settings", updated, "settings");
+  const updated = { ...settings, ...patch };
+  setSettings(updated);
+  cDel("settings");
+  const existing = await api.get("settings", {user_id: _userId});
+  if (existing) {
+    await api.update("settings", existing.id, patch, "settings");
+  } else {
+    await api.upsert("settings", {...updated, user_id: _userId}, "settings");
   }
+}
 
   async function handleSignOut() {
     await auth.signOut();
