@@ -967,6 +967,37 @@ function FinanceTab({settings, saveSettings}) {
     setPayments(prev=>prev.filter(p=>p.id!==id));
   }
 
+  async function markPaid(p) {
+  // Создаём транзакцию расхода
+  const t = await api.insert("transactions", {
+    date,
+    type: "expense",
+    amount: p.amount,
+    category: "💸 Другое",
+    note: p.name,
+  }, "transactions");
+  if (t) setTxs(prev=>[...prev,t]);
+
+  // Обновляем баланс
+  const existing = await api.get("settings", {user_id: _userId});
+  const newBalance = (settings.balance||0) - p.amount;
+  if (existing) await api.update("settings", existing.id, {balance: newBalance}, "settings");
+  else await api.upsert("settings", {user_id: _userId, balance: newBalance}, "settings");
+  saveSettings({balance: newBalance});
+
+  // Сдвигаем дату следующего платежа
+  let nextD = new Date(p.next_date);
+  if      (p.type === "once")    { await api.update("recurring_payments", p.id, {is_active: false}, "recurring_payments"); setPayments(prev=>prev.filter(x=>x.id!==p.id)); return; }
+  else if (p.type === "daily")   nextD.setDate(nextD.getDate()+1);
+  else if (p.type === "weekly")  nextD.setDate(nextD.getDate()+7);
+  else if (p.type === "monthly") nextD.setMonth(nextD.getMonth()+1);
+  else if (p.type === "custom")  nextD.setDate(nextD.getDate()+(p.interval_days||1));
+
+  const newNextDate = nextD.toISOString().slice(0,10);
+  await api.update("recurring_payments", p.id, {next_date: newNextDate}, "recurring_payments");
+  setPayments(prev=>prev.map(x=>x.id===p.id?{...x,next_date:newNextDate}:x));
+}
+
   const PAY_TYPES = [
     {id:"once",    label:"Разово"},
     {id:"monthly", label:"Каждый месяц"},
@@ -985,12 +1016,27 @@ function FinanceTab({settings, saveSettings}) {
           <div style={{fontSize:11,letterSpacing:2,color:"#e8c97a",textTransform:"uppercase",marginBottom:8}}>
             ⚠ Ближайшие платежи
           </div>
-          {soonPayments.map(p=>(
-            <div key={p.id} style={{display:"flex",justifyContent:"space-between",fontSize:13,marginBottom:4}}>
-              <span style={{color:"#f0ece4"}}>{p.name}</span>
-              <span style={{color:"#e07a5f"}}>−{fmt(p.amount)} ₽ · {new Date(p.next_date+"T12:00:00").toLocaleDateString("ru-RU",{day:"numeric",month:"short"})}</span>
-            </div>
-          ))}
+          {soonPayments.map(p=>{
+            const isToday = p.next_date === date;
+            return(
+             <div key={p.id} style={{display:"flex",alignItems:"center",gap:8,fontSize:13,marginBottom:6}}>
+                <div style={{flex:1}}>
+                 <span style={{color:"#f0ece4"}}>{p.name}</span>
+                 <span style={{color:"#e07a5f",marginLeft:8}}>−{fmt(p.amount)} ₽</span>
+                 <span style={{color:"#555",marginLeft:6}}>
+                   {isToday?"сегодня":new Date(p.next_date+"T12:00:00").toLocaleDateString("ru-RU",{day:"numeric",month:"short"})}
+                  </span>
+                </div>
+                {isToday&&(
+                  <button onClick={()=>markPaid(p)}
+                    style={{fontSize:11,padding:"3px 10px",borderRadius:6,border:"1px solid #81b29a",
+                      background:"#81b29a18",color:"#81b29a",cursor:"pointer",fontFamily:"inherit",whiteSpace:"nowrap"}}>
+                    ✓ Оплачено
+                  </button>
+                )}
+              </div>
+            );
+          })}
         </div>
       )}
 
