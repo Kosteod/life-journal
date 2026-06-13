@@ -158,7 +158,7 @@ const BLOCK_COLORS = {
   "работа":"#c9a96e","отдых":"#6b6760","прогулка":"#81b29a","свободно":"#2a2825",
 };
 const BLOCK_TYPES  = Object.keys(BLOCK_COLORS);
-const HOURS        = Array.from({length:18}, (_,i) => i+6);
+const HOURS        = Array.from({length:18}, (_,i) => i);
 const EXPENSE_CATS = ["🍔 Еда","🚇 Транспорт","☕ Кафе","🛒 Продукты","💊 Здоровье","📱 Подписки","👕 Одежда","🎮 Развлечения","📚 Учёба","💸 Другое"];
 const INCOME_CATS  = ["💼 Работа","🤝 Поддержка","📦 Прочее"];
 
