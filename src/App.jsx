@@ -870,7 +870,7 @@ function FinanceTab({settings, saveSettings}) {
   const workBalance = balance - savingsGoal - totalUpcoming;
 
   const todayTxs      = txs.filter(t=>t.date===date);
-  const todayExpenses = todayTxs.filter(t=>t.type==="expense").reduce((s,t)=>s+t.amount,0);
+  const todayExpenses = todayTxs.filter(t=>t.type==="expense"&&!t.skip_daily_limit).reduce((s,t)=>s+t.amount,0);
   const todayIncomes  = todayTxs.filter(t=>t.type==="income").reduce((s,t)=>s+t.amount,0);
   const balanceStartOfDay     = balance + todayExpenses - todayIncomes;
   const workBalanceStartOfDay = balanceStartOfDay - savingsGoal - totalUpcoming;
@@ -975,6 +975,7 @@ function FinanceTab({settings, saveSettings}) {
     amount: p.amount,
     category: "💸 Другое",
     note: p.name,
+    skip_daily_limit: true,
   }, "transactions");
   if (t) setTxs(prev=>[...prev,t]);
 
