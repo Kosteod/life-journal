@@ -135,8 +135,17 @@ const api = {
 // ─────────────────────────────────────────────────────────────────────────────
 // УТИЛИТЫ
 // ─────────────────────────────────────────────────────────────────────────────
-const todayISO  = () => new Date().toISOString().slice(0, 10);
-const monthISO  = () => { const d=new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}`; };
+const todayISO = () => {
+  const now = new Date();
+  // МСК = UTC+3
+  const msk = new Date(now.getTime() + 3 * 60 * 60 * 1000);
+  return msk.toISOString().slice(0, 10);
+};
+const monthISO = () => {
+  const now = new Date();
+  const msk = new Date(now.getTime() + 3 * 60 * 60 * 1000);
+  return `${msk.getUTCFullYear()}-${String(msk.getUTCMonth()+1).padStart(2,"0")}`;
+};
 const fmt       = (n, dec=0) => Number(n||0).toLocaleString("ru-RU", {minimumFractionDigits:dec, maximumFractionDigits:dec});
 const DAY_SHORT = ["Вс","Пн","Вт","Ср","Чт","Пт","Сб"];
 const MONTH_NAMES = ["Январь","Февраль","Март","Апрель","Май","Июнь","Июль","Август","Сентябрь","Октябрь","Ноябрь","Декабрь"];
@@ -158,7 +167,7 @@ const BLOCK_COLORS = {
   "работа":"#c9a96e","отдых":"#6b6760","прогулка":"#81b29a","свободно":"#2a2825",
 };
 const BLOCK_TYPES  = Object.keys(BLOCK_COLORS);
-const HOURS        = Array.from({length:18}, (_,i) => i);
+const HOURS        = Array.from({length:24}, (_,i) => i);
 const EXPENSE_CATS = ["🍔 Еда","🚇 Транспорт","☕ Кафе","🛒 Продукты","💊 Здоровье","📱 Подписки","👕 Одежда","🎮 Развлечения","📚 Учёба","💸 Другое"];
 const INCOME_CATS  = ["💼 Работа","🤝 Поддержка","📦 Прочее"];
 
