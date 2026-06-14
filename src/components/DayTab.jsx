@@ -1,3 +1,4 @@
+import { useState, useEffect } from "react";
 export default function DayTab({date, settings, saveSettings}) {
   const [log,          setLog]         = useState(null);
   const [schedule,     setSchedule]    = useState([]);

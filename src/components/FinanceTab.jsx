@@ -1,6 +1,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // ФИНАНСЫ — вставь вместо старой FinanceTab
 // ─────────────────────────────────────────────────────────────────────────────
+import { useState, useEffect } from "react";
 export default function FinanceTab({settings, saveSettings}) {
   const [txs,          setTxs]         = useState([]);
   const [payments,     setPayments]    = useState([]);
