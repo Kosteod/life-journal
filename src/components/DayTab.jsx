@@ -1,4 +1,4 @@
-function DayTab({date, settings, saveSettings}) {
+export default function DayTab({date, settings, saveSettings}) {
   const [log,          setLog]         = useState(null);
   const [schedule,     setSchedule]    = useState([]);
   const [templates,    setTemplates]   = useState([]);

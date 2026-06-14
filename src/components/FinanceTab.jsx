@@ -1,7 +1,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // ФИНАНСЫ — вставь вместо старой FinanceTab
 // ─────────────────────────────────────────────────────────────────────────────
-function FinanceTab({settings, saveSettings}) {
+export default function FinanceTab({settings, saveSettings}) {
   const [txs,          setTxs]         = useState([]);
   const [payments,     setPayments]    = useState([]);
   const [loading,      setLoading]     = useState(true);
