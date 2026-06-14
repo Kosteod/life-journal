@@ -2,6 +2,16 @@
 // ФИНАНСЫ — вставь вместо старой FinanceTab
 // ─────────────────────────────────────────────────────────────────────────────
 import { useState, useEffect } from "react";
+import {
+  todayISO,
+  monthISO,
+  fmt,
+  DAY_SHORT,
+  BLOCK_TYPES,
+  BLOCK_COLORS,
+  HOURS,
+  REPEAT_TYPES
+} from "../utils.js";
 export default function FinanceTab({settings, saveSettings}) {
   const [txs,          setTxs]         = useState([]);
   const [payments,     setPayments]    = useState([]);
